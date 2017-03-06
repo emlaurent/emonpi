@@ -1,4 +1,4 @@
-/****************
+/*
 
   emonPi  Discrete Sampling
 
@@ -66,8 +66,8 @@ EnergyMonitor ct1, ct2;
 
 int i2c_lcd_address[2]={0x27, 0x3f};                                  // I2C addresses to test for I2C LCD device
 int current_lcd_i2c_addr;                                                  // Used to store current I2C address as found by i2_lcd_detect()
-// LiquidCrystal_I2C lcd(0x27,16,2);                                  // Placeholder
-LiquidCrystal_I2C lcd(0,0,0);
+ LiquidCrystal_I2C lcd(0x27,16,2);                                  // Placeholder
+//LiquidCrystal_I2C lcd(0,0,0);
 
 
 //----------------------------emonPi Firmware Version---------------------------------------------------------------------------------------------------------------
@@ -80,7 +80,7 @@ const unsigned long BAUD_RATE=    38400;
 
 const byte Vrms_EU=               230;                              // Vrms for apparent power readings (when no AC-AC voltage sample is present)
 const byte Vrms_USA=              110;                              // USA apparent power VRMS
-const int TIME_BETWEEN_READINGS=  5000;                             // Time between readings (ms)
+const int TIME_BETWEEN_READINGS=  1000;                             // Time between readings (ms)
 const int RF_RESET_PERIOD=        60000;                            // Time (ms) between RF resets (hack to keep RFM60CW alive)
 
 
@@ -101,7 +101,8 @@ const int ACAC_DETECTION_LEVEL=   3000;
 
 const byte TEMPERATURE_PRECISION=  12;                                 // 9 (93.8ms),10 (187.5ms) ,11 (375ms) or 12 (750ms) bits equal to resplution of 0.5C, 0.25C, 0.125C and 0.0625C
 const byte MaxOnewire=             6;                                  // maximum number of DS18B20 one wire sensors
-boolean RF_STATUS=                 1;                                  // Turn RF on and off
+boolean RF_STATUS=                 0;                                  // Turn RF on and off
+boolean DC_STATUS=                 1;                                  // DC or AC inputs
 //-------------------------------------------------------------------------------------------------------------------------------------------
 //-------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -116,6 +117,11 @@ const byte emonPi_int1=                1;              // RJ45 pin 6 - INT1 - PW
 const byte emonPi_int1_pin=            3;              // RJ45 pin 6 - INT1 - PWM - Dig 3 - default pulse count input
 //const byte emonPi_int0=                2;            // Default RFM INT (Dig2) - Can be jumpered used JP5 to RJ45 pin 7 - PWM - D2
 #define ONE_WIRE_BUS                   4               // DS18B20 Data, RJ45 pin 4
+
+const byte pinrelais1=                10;              // 
+const byte pinrelais2=                12;              // 
+const byte pinrelais3=                11;              // 
+
 //-------------------------------------------------------------------------------------------------------------------------------------------
 
 //Setup DS128B20
@@ -130,6 +136,7 @@ byte RF_freq=RF12_433MHZ;                                        // Frequency of
 byte nodeID = 5;                                                 // emonpi node ID
 int networkGroup = 210;
 
+
 typedef struct {
 int power1;
 int power2;
@@ -138,10 +145,24 @@ int Vrms;
 int temp[MaxOnewire];
 unsigned long pulseCount;
 } PayloadTX;                                                    // create JeeLabs RF packet structure - a neat way of packaging data for RF comms
+/*
+typedef struct {
+int Vrms;
+int CT1;
+int power1;
+int Vrms;
+int temp[MaxOnewire];
+unsigned long pulseCount;
+} PayloadTX;                                                    // create JeeLabs RF packet structure - a neat way of packaging data for RF comms
+*/
 PayloadTX emonPi;
 //-------------------------------------------------------------------------------------------------------------------------------------------
 //-------------------------------------------------------------------------------------------------------------------------------------------
 
+  // pins used for the DC measurement
+  int analogInPinI = A1;    // Analog input pin for the current
+  int analogInPinUi = A0;   // Analog input pin for the tension
+  int analogInPin3V3 = A3;  // Analog input pin for the 3v3 tension
 
 //Global Variables Energy Monitoring
 double Vcal, vrms;
@@ -202,27 +223,63 @@ void setup()
   current_lcd_i2c_addr = i2c_lcd_detect(i2c_lcd_address);
   LiquidCrystal_I2C lcd(current_lcd_i2c_addr,16,2);                                   // LCD I2C address to 0x27, 16x2 line display
   emonPi_LCD_Startup(current_lcd_i2c_addr);
+
+  // test LED
+  double_LED_flash();
+  double_LED_flash();
+  double_LED_flash();
+
+  // test relais
+  digitalWrite(pinrelais1, HIGH);
+  delay(1000);                  // waits for a second
+  digitalWrite(pinrelais1, LOW);
   
+  Serial.println("check DC status");
+
   delay(2000);
-  CT_Detect();
+  if (DC_STATUS==0) CT_Detect();
   serial_print_startup(current_lcd_i2c_addr);
 
   attachInterrupt(emonPi_int1, onPulse, FALLING);  // Attach pulse counting interrupt on RJ45 (Dig 3 / INT 1)
   emonPi.pulseCount = 0;                                                  // Reset Pulse Count
 
+  if (DC_STATUS==0) {
+    ct1.current(1, Ical1);                                     // CT ADC channel 1, calibration.  calibration (2000 turns / 22 Ohm burden resistor = 90.909)
+    ct2.current(2, Ical2);                                     // CT ADC channel 2, calibration.
 
-
-  ct1.current(1, Ical1);                                     // CT ADC channel 1, calibration.  calibration (2000 turns / 22 Ohm burden resistor = 90.909)
-  ct2.current(2, Ical2);                                     // CT ADC channel 2, calibration.
-
-  if (ACAC)                                                           //If AC wavefrom has been detected
-  {
-    ct1.voltage(0, Vcal, phase_shift);                       // ADC pin, Calibration, phase_shift
-    ct2.voltage(0, Vcal, phase_shift);                       // ADC pin, Calibration, phase_shift
+    if (ACAC)                                                           //If AC wavefrom has been detected
+    {
+      ct1.voltage(0, Vcal, phase_shift);                       // ADC pin, Calibration, phase_shift
+      ct2.voltage(0, Vcal, phase_shift);                       // ADC pin, Calibration, phase_shift
+    }
   }
 
 } //end setup
 
+// Mesure de la référence interne à 1.1 volts
+// pour augmenter la précision de la msure de tension
+unsigned int analogReadReference(void) {
+  
+  // Elimine toutes charges résiduelles
+  ADMUX = 0x4F;
+  delayMicroseconds(5);
+  
+  // Sélectionne la référence interne à 1.1 volts comme point de mesure, avec comme limite haute VCC
+  ADMUX = 0x4E;
+  delayMicroseconds(200);
+  
+  // Active le convertisseur analogique -> numérique
+  ADCSRA |= (1 << ADEN);
+  
+  // Lance une conversion analogique -> numérique
+  ADCSRA |= (1 << ADSC);
+  
+  // Attend la fin de la conversion
+  while(ADCSRA & (1 << ADSC));
+  
+  // Récupère le résultat de la conversion
+  return ADCL | (ADCH << 8);
+}
 
 //-------------------------------------------------------------------------------------------------------------------------------------------
 // LOOP ********************************************************************************************
@@ -247,7 +304,9 @@ void loop()
   ct2.voltage(0, Vcal, phase_shift);                       // ADC pin, Calibration, phase_shift
 
   if (digitalRead(shutdown_switch_pin) == 0 )
-    digitalWrite(emonpi_GPIO_pin, HIGH);                                          // if emonPi shutdown butten pressed then send signal to the Pi on GPIO 11
+   { Serial.print("shutdown ! - ");
+     digitalWrite(emonpi_GPIO_pin, HIGH);                                          // if emonPi shutdown butten pressed then send signal to the Pi on GPIO 11
+   }
   else
     digitalWrite(emonpi_GPIO_pin, LOW);
 
@@ -273,8 +332,98 @@ void loop()
 
   if ((now - last_sample) > TIME_BETWEEN_READINGS)
   {
-    single_LED_flash();                                                            // single flash of LED on local CT sample
+   single_LED_flash();                                                            // single flash of LED on local CT sample
 
+   if (DC_STATUS == 1) {
+   
+    // Idéalement : VCC = 5 volts = 1023
+    // Référence interne = 1.1 volts = (1023 * 1.1) / 5 = 225
+  
+    // En mesurant la référence à 1.1 volts, on peut déduire
+    // la tension d'alimentation réelle du microcontrôleur
+    // VCC = (1023 * 1.1) / analogReadReference()
+
+    float tension_alim = (1023 * 1.1) / analogReadReference();
+
+    // mesure de la tension en sortie du capteur de courant
+    float VS = analogRead(analogInPinI) * tension_alim / 1023;
+
+    // mesure de la tension sur la pin 3.3volt
+    float U3V3 = analogRead(analogInPin3V3) * tension_alim / 1023;
+
+    // mesure de la tension U (facteur de multiplication a corriger)
+    float Ui = analogRead(analogInPinUi) * ((10+4.7)/4.7) * tension_alim / 1023;
+  
+    // calcul du courant I
+    float I = (VS-U3V3*0.5)/0.11;
+
+    // calcul de la puissance P
+    float P = Ui*I;
+
+    // securite si la tension sur la pin de l'arduino est supérieure à la tension d'alim
+    // la mesure est saturée et risque d'abimé l'arduino.
+    // le flag passe à 0
+    // if (emonPi.Vrms >= 100*tension_alim*0.95) Serial.println("U saturé !");
+
+    // affichage en clair des valeurs mesurées
+    // pour masquer ces données, commentez de ici... 
+    Serial.println(" ");
+
+    Serial.print("  Ualim=");
+    Serial.print(tension_alim);
+
+    Serial.print("  U3V3=");
+    Serial.print(U3V3,3);
+
+    Serial.print("  Vs=");
+    Serial.print(VS);
+
+    Serial.print("  Ui=");
+    Serial.print(Ui);
+
+    Serial.print("  I=");
+    Serial.print(I);
+
+    Serial.print("  P1=");
+    Serial.println(P);
+    Serial.println(" ");
+
+    // ... à ici
+
+    // relais
+    // ajouter un hystérésis
+  /*  if (P < 0.5) {               // couper tous les relais si puissance faible
+      digitalWrite(pinrelais1, LOW);      
+      digitalWrite(pinrelais2, LOW);      
+      digitalWrite(pinrelais3, LOW);      
+    }*/
+    if ((P > -10)&&(P < 5)) {               // couper tous les relais si puissance faible
+      digitalWrite(pinrelais1, HIGH);      
+      digitalWrite(pinrelais2, LOW);      
+      digitalWrite(pinrelais3, LOW);      
+    }
+    if ((P > 5)&&(P < 15)) {
+      digitalWrite(pinrelais1, HIGH);      
+      digitalWrite(pinrelais2, HIGH);      
+      digitalWrite(pinrelais3, LOW);      
+    }
+    if (P > 15) {
+      digitalWrite(pinrelais1, HIGH);      
+      digitalWrite(pinrelais2, HIGH);      
+      digitalWrite(pinrelais3, HIGH);      
+    }
+  
+    // calcul de la puisance P=U*I
+    CT1 = I*1000;
+    CT2 = 0;
+    emonPi.power1 = abs(P)*1000;     		// puissance U*I
+    emonPi.power2 = Ui*I;               // transmission courant
+    emonPi.power1_plus_2=emonPi.power1;                                      
+    emonPi.Vrms = Ui*100;
+   }
+
+   if (DC_STATUS == 0) {
+ 
     if (ACAC && CT1)                                                                      // Read from CT 1
     {
       ct1.calcVI(no_of_half_wavelengths,timeout); emonPi.power1=ct1.realPower;
@@ -303,7 +452,7 @@ void loop()
      ct1.calcVI(no_of_half_wavelengths,timeout);
      emonPi.Vrms=ct1.Vrms*100;
    }
-
+  }
   //Serial.print(emonPi.pulseCount); Serial.print(" ");delay(5);
    // if (debug==1) {Serial.print(emonPi.power2); Serial.print(" ");delay(5);}
 
